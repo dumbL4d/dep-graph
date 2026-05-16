@@ -1,0 +1,891 @@
+import { writeFileSync, readFileSync, existsSync } from "fs";
+import { join } from "path";
+import type { DependencyGraph } from "./types";
+
+function loadGraphData(): DependencyGraph {
+  const path = join(import.meta.dir, "..", "graph.json");
+  if (!existsSync(path)) {
+    return { nodes: [], edges: [], toolMap: new Map() };
+  }
+  const raw = JSON.parse(readFileSync(path, "utf-8"));
+  return {
+    nodes: raw.nodes,
+    edges: raw.edges,
+    toolMap: new Map(),
+  };
+}
+
+function generateHTML(graph: DependencyGraph): string {
+  const nodesJSON = JSON.stringify(graph.nodes);
+  const edgesJSON = JSON.stringify(graph.edges);
+
+  const totalEdges = graph.edges.length;
+  const totalNodes = graph.nodes.length;
+  const gsNodes = graph.nodes.filter((n) => n.toolkit === "googlesuper").length;
+  const ghNodes = graph.nodes.filter((n) => n.toolkit === "github").length;
+  const gsEdges = graph.edges.filter((e) => e.from.startsWith("GOOGLESUPER")).length;
+  const ghEdges = graph.edges.filter((e) => e.from.startsWith("GITHUB")).length;
+
+  const toolMap: Record<string, { label: string; toolkit: string }> = {};
+  for (const n of graph.nodes) {
+    toolMap[n.id] = { label: n.label, toolkit: n.toolkit };
+  }
+
+  const outDegree: Record<string, string[]> = {};
+  const inDegree: Record<string, string[]> = {};
+  for (const e of graph.edges) {
+    (outDegree[e.from] ??= []).push(e.to);
+    (inDegree[e.to] ??= []).push(e.from);
+  }
+
+  const sortedByOut = Object.entries(outDegree)
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 10)
+    .map(([k, v]) => [k, v.length]);
+  const sortedByIn = Object.entries(inDegree)
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 10)
+    .map(([k, v]) => [k, v.length]);
+
+  const topProducersJSON = JSON.stringify(sortedByOut);
+  const topConsumersJSON = JSON.stringify(sortedByIn);
+
+  const paramDist: Record<string, number> = {};
+  for (const e of graph.edges) {
+    paramDist[e.paramMatch] = (paramDist[e.paramMatch] || 0) + 1;
+  }
+  const topParams = Object.entries(paramDist)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+  const topParamsJSON = JSON.stringify(topParams);
+
+  return `<!DOCTYPE html><html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tool Dependency Graph — Composio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+:root{--bg:#0b0b1a;--surface:#14142e;--border:#1f1f45;--text:#d4d4e8;--text-dim:#6b6b95;--accent:#e94560;--accent2:#4f6ced;--gold:#f5c842;--radius:8px;--font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{font-family:var(--font);background:var(--bg);color:var(--text);overflow:hidden;font-size:14px;line-height:1.5}
+input,select,button{font-family:inherit}
+
+/* Tabs */
+.tabs{position:fixed;top:0;left:0;right:0;z-index:200;background:var(--surface);display:flex;align-items:center;padding:0 24px;height:50px;border-bottom:1px solid var(--border);gap:2px;user-select:none}
+.tabs .logo{font-size:15px;font-weight:700;color:var(--accent);margin-right:24px;letter-spacing:-0.3px}
+.tabs .logo span{color:var(--text-dim);font-weight:500}
+.tab-btn{background:none;border:none;color:var(--text-dim);padding:0 14px;height:50px;cursor:pointer;font-size:13px;font-weight:500;position:relative;transition:color .15s}
+.tab-btn:hover{color:var(--text)}
+.tab-btn.active{color:var(--accent)}
+.tab-btn.active::after{content:'';position:absolute;bottom:0;left:6px;right:6px;height:2px;background:var(--accent);border-radius:1px}
+.tab-content{display:none;position:fixed;top:50px;left:0;right:0;bottom:0}
+.tab-content.active{display:flex}
+
+/* Graph tab */
+#graph-tab{flex-direction:column}
+.ctrl-bar{display:flex;align-items:center;gap:10px;padding:7px 16px;background:var(--surface);border-bottom:1px solid var(--border);flex-wrap:wrap;flex-shrink:0}
+.ctrl-bar label{font-size:11px;color:var(--text-dim);font-weight:500;text-transform:uppercase;letter-spacing:.4px}
+.ctrl-bar select,.ctrl-bar input{background:var(--bg);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:5px;font-size:12px;outline:none}
+.ctrl-bar select:focus,.ctrl-bar input:focus{border-color:var(--accent)}
+.ctrl-bar input{width:160px}
+.ctrl-bar .meta{font-size:11px;color:var(--text-dim);margin-left:auto;white-space:nowrap}
+#graph-container{flex:1;position:relative;min-height:0}
+#nav-wrap{position:absolute;bottom:20px;right:20px;z-index:10;display:flex;flex-direction:column;gap:5px;pointer-events:none}
+#nav-wrap button{pointer-events:auto;width:34px;height:34px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;transition:all .12s}
+#nav-wrap button:hover{background:var(--border);color:#fff}
+#nav-wrap .exp-btn{font-size:10px;font-weight:700;width:auto;padding:0 10px;letter-spacing:.5px;color:var(--gold);border-color:var(--gold)}
+
+/* Legend */
+#legend{position:absolute;top:12px;right:12px;z-index:10;background:var(--surface);padding:10px 14px;border-radius:var(--radius);border:1px solid var(--border);font-size:11px;box-shadow:0 4px 16px rgba(0,0,0,.4);pointer-events:none}
+#legend h4{font-size:11px;font-weight:600;margin-bottom:5px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
+.lg-item{display:flex;align-items:center;gap:7px;margin-bottom:2px}
+.lg-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.lg-line{width:18px;height:2px;flex-shrink:0;background:var(--gold);opacity:.5}
+
+/* Planner tab */
+#planner-tab{flex-direction:column;align-items:center;padding:40px 20px;overflow-y:auto}
+.planner-wrap{max-width:720px;width:100%}
+.planner-wrap h2{font-size:20px;font-weight:700;margin-bottom:2px}
+.planner-wrap .sub{color:var(--text-dim);font-size:13px;margin-bottom:20px}
+.planner-controls{display:flex;gap:10px;margin-bottom:16px}
+.planner-controls select{flex:1;background:var(--surface);color:var(--text);border:1px solid var(--border);padding:10px 14px;border-radius:var(--radius);font-size:13px;outline:none}
+.planner-controls select:focus{border-color:var(--accent)}
+.planner-controls button{background:var(--accent);color:#fff;border:none;padding:10px 22px;border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.planner-controls button:hover{opacity:.85}
+.planner-controls button:disabled{opacity:.4;cursor:default}
+.plan-out{width:100%}
+.plan-out .summary{font-size:13px;color:var(--text-dim);margin-bottom:12px}
+.plan-step{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:6px;animation:fadeSlide .3s ease both;transition:opacity .3s,border-color .3s,box-shadow .3s}
+.plan-step .num{width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
+.plan-step .info{flex:1;min-width:0}
+.plan-step .info strong{font-size:13px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plan-step .info small{color:var(--text-dim);font-size:11px}
+.plan-step .tag{font-size:10px;padding:2px 7px;border-radius:3px;font-weight:600;text-transform:uppercase;flex-shrink:0}
+.plan-step .tag.producer{background:rgba(79,108,237,.15);color:var(--accent2)}
+.plan-step .tag.consumer{background:rgba(233,69,96,.15);color:var(--accent)}
+.plan-step .arrow{color:var(--gold);font-size:16px;flex-shrink:0;opacity:.7}
+.plan-search-wrap{position:relative;flex:1}
+#plan-input{width:100%;background:var(--surface);color:var(--text);border:1px solid var(--border);padding:10px 14px;border-radius:var(--radius);font-size:13px;outline:none;box-sizing:border-box}
+#plan-input:focus{border-color:var(--accent)}
+#plan-results{position:absolute;top:100%;left:0;right:0;z-index:100;background:var(--surface);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);max-height:280px;overflow-y:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+#plan-results .pr-item{padding:9px 14px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border);transition:background .1s;color:var(--text)}
+#plan-results .pr-item:last-child{border-bottom:none}
+#plan-results .pr-item:hover,#plan-results .pr-item.sel{background:var(--bg)}
+#plan-results .pr-item small{color:var(--text-dim);font-size:11px;margin-left:6px}
+#plan-results .pr-empty{padding:14px;color:var(--text-dim);font-size:12px;text-align:center}
+#plan-graph{width:100%;height:260px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;display:none;position:relative;overflow:hidden}
+.plan-empty{text-align:center;padding:60px 20px;color:var(--text-dim)}
+.plan-empty .icon{font-size:32px;margin-bottom:10px;opacity:.4}
+.plan-empty h3{font-size:15px;margin-bottom:4px;color:var(--text)}
+.plan-empty p{font-size:13px}
+.sim-btn{display:none;margin-top:14px;background:transparent;color:var(--gold);border:1px solid var(--gold);padding:9px 18px;border-radius:var(--radius);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
+.sim-btn:hover{background:rgba(245,200,66,.08)}
+.sim-btn:disabled{opacity:.4;cursor:default}
+.sim-active .plan-step{opacity:.3}
+.sim-active .plan-step.done{opacity:.65}
+.sim-active .plan-step.current{opacity:1;border-color:var(--gold);box-shadow:0 0 18px rgba(245,200,66,.12)}
+@keyframes fadeSlide{from{opacity:0;transform:translateY(-6px)}}
+
+/* Stats tab */
+#stats-tab{overflow-y:auto;padding:28px 24px;flex-direction:column}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:28px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px;text-align:center}
+.stat-card .num{font-size:26px;font-weight:700;color:var(--accent)}
+.stat-card .num.accent2{color:var(--accent2)}
+.stat-card .num.gold{color:var(--gold)}
+.stat-card .lbl{font-size:11px;color:var(--text-dim);margin-top:3px;text-transform:uppercase;letter-spacing:.3px;font-weight:500}
+.stats-section{margin-bottom:24px}
+.stats-section h3{font-size:13px;font-weight:600;margin-bottom:10px;color:var(--text)}
+.tags-list{display:flex;gap:6px;flex-wrap:wrap}
+.tag-item{background:var(--surface);border:1px solid var(--border);padding:6px 12px;border-radius:5px;font-size:12px;display:flex;align-items:center;gap:7px}
+.tag-item .count{color:var(--accent);font-weight:600}
+.tag-item .name{color:var(--text-dim)}
+.rank-list{list-style:none}
+.rank-list li{display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:5px;margin-bottom:3px;font-size:12px}
+.rank-list .rnk{width:18px;color:var(--text-dim);font-weight:600;font-size:11px;flex-shrink:0}
+.rank-list .slug{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rank-list .cnt{color:var(--accent);font-weight:600;flex-shrink:0}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.stats-footer{text-align:center;color:var(--text-dim);font-size:11px;padding:12px 0 20px;border-top:1px solid var(--border);margin-top:8px}
+
+/* Detail panel */
+#detail{position:fixed;top:50px;right:-420px;width:400px;bottom:0;z-index:150;background:var(--surface);border-left:1px solid var(--border);padding:24px;overflow-y:auto;transition:right .35s cubic-bezier(.4,0,.2,1);box-shadow:-4px 0 24px rgba(0,0,0,.5)}
+#detail.open{right:0}
+#detail .close-btn{position:absolute;top:14px;right:14px;background:none;border:none;color:var(--text-dim);font-size:18px;cursor:pointer;width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:4px}
+#detail .close-btn:hover{color:var(--text);background:var(--bg)}
+#detail h2{font-size:16px;font-weight:700;margin-bottom:1px;padding-right:28px}
+#detail .tk-tag{display:inline-block;font-size:10px;padding:2px 7px;border-radius:3px;font-weight:600;margin-bottom:14px}
+#detail .tk-tag.gs{background:rgba(233,69,96,.12);color:var(--accent)}
+#detail .tk-tag.gh{background:rgba(79,108,237,.12);color:var(--accent2)}
+#detail .sec{margin-bottom:14px}
+#detail .sec h4{font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+#detail .sec .p{font-size:13px;color:#aaa;line-height:1.5}
+.chip{display:inline-block;background:var(--bg);padding:2px 7px;border-radius:3px;font-size:11px;margin:1px}
+.chip.req{background:rgba(233,69,96,.08);color:var(--accent)}
+.dep-list{margin-top:6px}
+.dep-item{font-size:12px;padding:5px 9px;background:var(--bg);border-radius:4px;margin-bottom:3px;cursor:pointer;transition:background .12s}
+.dep-item:hover{background:var(--border)}
+.dep-item .hint{color:var(--text-dim);font-size:10px}
+.dep-item .hl{color:var(--gold)}
+
+/* Loading */
+#loading{position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;transition:opacity .4s;pointer-events:none}
+#loading.hidden{opacity:0}
+#loading .spinner{width:32px;height:32px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loading p{color:var(--text-dim);font-size:13px}
+
+/* Toolkits tab */
+#toolkits-tab{flex-direction:column;padding:40px 20px;overflow-y:auto;align-items:center}
+.tk-wrap{max-width:560px;width:100%}
+.tk-wrap h2{font-size:20px;font-weight:700;margin-bottom:2px}
+.tk-wrap .sub{color:var(--text-dim);font-size:13px;margin-bottom:20px}
+.tk-field{display:flex;gap:8px;margin-bottom:10px;align-items:center}
+.tk-field label{font-size:11px;color:var(--text-dim);font-weight:500;text-transform:uppercase;letter-spacing:.4px;min-width:60px;flex-shrink:0}
+.tk-field input{flex:1;background:var(--surface);color:var(--text);border:1px solid var(--border);padding:8px 12px;border-radius:var(--radius);font-size:13px;outline:none}
+.tk-field input:focus{border-color:var(--accent)}
+.tk-field button{background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+.tk-field button:hover{opacity:.85}
+.tk-field button:disabled{opacity:.4;cursor:default}
+.tk-list{margin-top:16px}
+.tk-item{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:4px}
+.tk-item .tk-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.tk-item .tk-name{flex:1;font-size:13px;font-weight:500}
+.tk-item .tk-count{color:var(--text-dim);font-size:11px}
+.tk-item .tk-rm{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:15px;padding:2px 6px;border-radius:3px;line-height:1}
+.tk-item .tk-rm:hover{color:var(--accent);background:rgba(233,69,96,.1)}
+.tk-note{font-size:11px;color:var(--text-dim);margin-top:8px;text-align:center}
+.tk-status{font-size:12px;color:var(--text-dim);margin-top:8px;text-align:center;min-height:20px}
+.tk-status.ok{color:var(--gold)}
+.tk-status.err{color:var(--accent)}
+
+@media(max-width:640px){
+  .tabs{padding:0 12px}
+  .tabs .logo{font-size:13px;margin-right:14px}
+  .tab-btn{padding:0 8px;font-size:12px}
+  #detail{width:100%;right:-100%}
+  .ctrl-bar input{width:110px}
+  .cols{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<div id="loading"><div class="spinner"></div><p>Loading dependency graph...</p></div>
+
+<div class="tabs">
+  <div class="logo">Dep<span>Graph</span></div>
+  <button class="tab-btn active" data-tab="graph">Graph</button>
+  <button class="tab-btn" data-tab="planner">Planner</button>
+  <button class="tab-btn" data-tab="stats">Stats</button>
+  <button class="tab-btn" data-tab="toolkits">Toolkits</button>
+</div>
+
+<div class="tab-content active" id="graph-tab">
+  <div class="ctrl-bar">
+    <label>Toolkit</label>
+    <select id="filter-tk">
+      <option value="all">All</option>
+      <option value="googlesuper">Google Super</option>
+      <option value="github">GitHub</option>
+    </select>
+    <label>Search</label>
+    <input id="filter-q" type="text" placeholder="Name or slug..." />
+    <label>Confidence</label>
+    <select id="filter-conf">
+      <option value="0">All</option>
+      <option value="0.7" selected>&ge;0.7</option>
+      <option value="0.9">&ge;0.9</option>
+    </select>
+    <label>Layout</label>
+    <select id="filter-layout">
+      <option value="force">Force</option>
+      <option value="hierarchical">Hierarchical</option>
+    </select>
+    <span class="meta" id="graph-meta"></span>
+  </div>
+  <div id="graph-container">
+    <div id="legend">
+      <h4>Legend</h4>
+      <div class="lg-item"><span class="lg-dot" style="background:var(--accent)"></span> Google Super</div>
+      <div class="lg-item"><span class="lg-dot" style="background:var(--accent2)"></span> GitHub</div>
+      <div class="lg-item"><span class="lg-line"></span> Dependency</div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-content" id="planner-tab">
+  <div class="planner-wrap">
+    <h2>Workflow Planner</h2>
+    <p class="sub">Select a target tool to see the ordered execution plan — all prerequisite tools resolved.</p>
+    <div class="planner-controls">
+      <div class="plan-search-wrap">
+        <input id="plan-input" type="text" placeholder="Type to search tools..." autocomplete="off" />
+        <div id="plan-results"></div>
+      </div>
+      <button id="plan-go">Plan</button>
+    </div>
+    <div id="plan-graph"><span style="position:absolute;bottom:6px;right:10px;font-size:10px;color:var(--text-dim);z-index:5;pointer-events:none">Dependency flow</span></div>
+    <div class="plan-out" id="plan-out">
+      <div class="plan-empty">
+        <div class="icon">&#9679;</div>
+        <h3>Select a target tool</h3>
+        <p>Pick a tool above. The planner will trace its dependencies and show what must execute first.</p>
+      </div>
+    </div>
+    <button class="sim-btn" id="sim-btn">&#9654; Simulate Execution</button>
+  </div>
+</div>
+
+<div class="tab-content" id="stats-tab">
+  <div class="stats-grid">
+    <div class="stat-card"><div class="num gold">${totalNodes}</div><div class="lbl">Total Tools</div></div>
+    <div class="stat-card"><div class="num gold">${totalEdges}</div><div class="lbl">Dependencies</div></div>
+    <div class="stat-card"><div class="num">${gsNodes}</div><div class="lbl">Google Super Tools</div></div>
+    <div class="stat-card"><div class="num accent2">${ghNodes}</div><div class="lbl">GitHub Tools</div></div>
+    <div class="stat-card"><div class="num">${gsEdges}</div><div class="lbl">Google Super Edges</div></div>
+    <div class="stat-card"><div class="num accent2">${ghEdges}</div><div class="lbl">GitHub Edges</div></div>
+  </div>
+
+  <div class="stats-section">
+    <h3>Top Referenced Parameters</h3>
+    <div class="tags-list" id="stats-params"></div>
+  </div>
+
+  <div class="cols">
+    <div class="stats-section">
+      <h3>Top Producers (outgoing edges)</h3>
+      <ul class="rank-list" id="stats-producers"></ul>
+    </div>
+    <div class="stats-section">
+      <h3>Top Consumers (incoming edges)</h3>
+      <ul class="rank-list" id="stats-consumers"></ul>
+    </div>
+  </div>
+
+  <div class="stats-footer">
+    Analysis across ${totalNodes} tools &middot; ${totalEdges} dependency edges via JSON Schema reference matching
+  </div>
+</div>
+
+<div class="tab-content" id="toolkits-tab">
+  <div class="tk-wrap">
+    <h2>Manage Toolkits</h2>
+    <p class="sub">Fetch additional Composio toolkits via the local server. They will be merged into the graph.</p>
+    <div class="tk-field">
+      <label>Server</label>
+      <input id="tk-server" type="text" value="http://localhost:3456" />
+    </div>
+    <div class="tk-field">
+      <label>API Key</label>
+      <input id="tk-key" type="password" placeholder="Optional — uses COMPOSIO_API_KEY from server env" />
+    </div>
+    <div class="tk-field">
+      <label>Toolkit</label>
+      <input id="tk-slug" type="text" placeholder="e.g. slack, notion, asana" />
+      <button id="tk-fetch">Fetch</button>
+    </div>
+    <div class="tk-status" id="tk-status">Enter a toolkit slug and click Fetch. Start the server with <strong>bun run server.ts</strong>.</div>
+    <div class="tk-list" id="tk-list">
+      <div class="tk-item">
+        <span class="tk-dot" style="background:#e94560"></span>
+        <span class="tk-name">Google Super</span>
+        <span class="tk-count">${gsNodes} tools</span>
+        <span style="font-size:10px;color:var(--text-dim)">pre-loaded</span>
+      </div>
+      <div class="tk-item">
+        <span class="tk-dot" style="background:#4f6ced"></span>
+        <span class="tk-name">GitHub</span>
+        <span class="tk-count">${ghNodes} tools</span>
+        <span style="font-size:10px;color:var(--text-dim)">pre-loaded</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="detail">
+  <button class="close-btn" id="detail-close">&#10005;</button>
+  <h2 id="dt-title"></h2>
+  <span class="tk-tag" id="dt-badge"></span>
+  <div class="sec" id="dt-desc"></div>
+  <div class="sec">
+    <h4>Required Parameters</h4>
+    <div id="dt-params"></div>
+  </div>
+  <div class="sec">
+    <h4>Prerequisites</h4>
+    <div id="dt-in"></div>
+  </div>
+  <div class="sec">
+    <h4>Dependents</h4>
+    <div id="dt-out"></div>
+  </div>
+  <div class="sec">
+    <h4>Downstream Impact</h4>
+    <div id="dt-impact"></div>
+  </div>
+</div>
+
+<script>
+const NODES = ${nodesJSON};
+const EDGES = ${edgesJSON};
+const TMAP = ${JSON.stringify(toolMap)};
+
+let COL = {googlesuper:{bg:"#e94560",bd:"#ff6b81",hl:"#e94560"},github:{bg:"#4f6ced",bd:"#6b85f0",hl:"#4f6ced"}};
+const TK_PALETTE = [
+  {bg:"#2ecc71",bd:"#4cdd8a",hl:"#2ecc71"},
+  {bg:"#f39c12",bd:"#f5b342",hl:"#f39c12"},
+  {bg:"#9b59b6",bd:"#b373cc",hl:"#9b59b6"},
+  {bg:"#1abc9c",bd:"#3dd0b4",hl:"#1abc9c"},
+  {bg:"#e74c3c",bd:"#ec7063",hl:"#e74c3c"},
+  {bg:"#3498db",bd:"#5dade2",hl:"#3498db"},
+  {bg:"#e91e63",bd:"#f06292",hl:"#e91e63"},
+  {bg:"#00bcd4",bd:"#4dd0e1",hl:"#00bcd4"},
+  {bg:"#8bc34a",bd:"#a2d16d",hl:"#8bc34a"},
+  {bg:"#ff9800",bd:"#ffb74d",hl:"#ff9800"},
+  {bg:"#795548",bd:"#967166",hl:"#795548"},
+  {bg:"#607d8b",bd:"#8aa0ae",hl:"#607d8b"},
+];
+let nextColorIdx = 2;
+
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    const el = document.getElementById(b.dataset.tab + '-tab');
+    el.classList.add('active');
+    if (b.dataset.tab === 'graph' && network) setTimeout(() => network.fit(), 50);
+  });
+});
+
+// Graph
+let network = null;
+
+function buildNet(tk, q, minC) {
+  q = (q||"").toLowerCase().trim();
+  let fn = tk === "all" ? NODES : NODES.filter(n => n.toolkit === tk);
+  if (q) fn = fn.filter(n => n.id.toLowerCase().includes(q) || n.label.toLowerCase().includes(q));
+  const ns = new Set(fn.map(n => n.id));
+  let fe = EDGES.filter(e => ns.has(e.from) && ns.has(e.to) && e.confidence >= minC);
+  const es = new Set(fe.flatMap(e => [e.from, e.to]));
+  const fin = fe.length ? fn.filter(n => es.has(n.id)) : fn;
+  const vn = new vis.DataSet(fin.map(n => {
+    const c = COL[n.toolkit]||{bg:"#666",bd:"#888",hl:"#999"};
+    return {id:n.id, label:n.label.length>34?n.label.substring(0,31)+"...":n.label,
+      color:{background:c.bg,border:c.bd,highlight:{background:c.hl,border:c.hl}},
+      font:{color:"#e0e0e0",size:10.5}, shape:"dot", size:15, borderWidth:2};
+  }));
+  const ve = new vis.DataSet(fe.map(e => ({
+    from:e.from, to:e.to,
+    title:e.from+" → "+e.to+" ("+e.paramMatch+")",
+    label:e.paramMatch, font:{size:8, color:"#999", strokeWidth:0, align:"middle"},
+    color:{color:"rgba(245,200,66,0.45)", highlight:"#f5c842"},
+    arrows:{to:{enabled:true,scaleFactor:0.5}},
+    width:0.8+e.confidence*0.6, smooth:{type:"curvedCW",roundness:0.1},
+    dashes:e.confidence<0.7
+  })));
+  document.getElementById("graph-meta").textContent = vn.length+" tools, "+ve.length+" edges";
+  return {nodes:vn, edges:ve};
+}
+
+function renderGraph() {
+  const {nodes,edges} = buildNet(
+    document.getElementById("filter-tk").value,
+    document.getElementById("filter-q").value,
+    parseFloat(document.getElementById("filter-conf").value)||0
+  );
+  const layoutMode = document.getElementById("filter-layout").value;
+  const isHier = layoutMode === "hierarchical";
+  const opts = {
+    nodes:{borderWidth:2},
+    edges:{smooth:{type:"curvedCW",roundness:0.1}},
+    physics:isHier ? false : {stabilization:{iterations:80}, solver:"forceAtlas2Based",
+      forceAtlas2Based:{gravitationalConstant:-35, centralGravity:0.003, springLength:160, springConstant:0.03, damping:0.45}},
+    interaction:{hover:true, tooltipDelay:80, navigationButtons:false, keyboard:true},
+    layout:isHier ? {hierarchical:{direction:"UD",sortMethod:"directed",nodeSpacing:80,levelSeparation:60,blockShifting:true,edgeMinimization:true}} : {improvedLayout:true}
+  };
+  const container = document.getElementById("graph-container");
+  if (network) network.destroy();
+  network = new vis.Network(container, {nodes,edges}, opts);
+  network.on("click", p => { if (p.nodes.length) showDetail(p.nodes[0]); else hideDetail(); });
+  network.on("oncontext", p => { p.event.preventDefault(); if (p.nodes.length) showDetail(p.nodes[0]); });
+  if (isHier) setTimeout(() => network.fit({animation:false}), 100);
+}
+
+// Detail panel
+function showDetail(slug) {
+  const n = NODES.find(x => x.id === slug);
+  if (!n) return;
+  document.getElementById("dt-title").textContent = n.label;
+  const badge = document.getElementById("dt-badge");
+  const tkLabel = n.toolkit === "googlesuper" ? "Google Super" : n.toolkit === "github" ? "GitHub" : n.toolkit.charAt(0).toUpperCase() + n.toolkit.slice(1);
+  badge.textContent = tkLabel;
+  badge.className = "tk-tag " + (n.toolkit === "github" ? "gh" : n.toolkit === "googlesuper" ? "gs" : "");
+  document.getElementById("dt-desc").innerHTML = '<div class="p">' + n.label + ' (' + n.id + ')</div>';
+  const deps = EDGES.filter(e => e.to === slug);
+  const used = EDGES.filter(e => e.from === slug);
+  document.getElementById("dt-params").innerHTML = deps.length
+    ? deps.map(d => '<span class="chip req">'+d.paramMatch+'</span>').join("")
+    : '<span style="font-size:12px;color:var(--text-dim)">No dependency parameters</span>';
+  document.getElementById("dt-in").innerHTML = deps.length
+    ? deps.map(d => {
+        const info = TMAP[d.from]||{label:d.from};
+        return '<div class="dep-item" data-slug="'+d.from+'">'+info.label+' <span class="hint">provides</span> <span class="hl">'+d.paramMatch+'</span></div>';
+      }).join("")
+    : '<span style="font-size:12px;color:var(--text-dim)">None — this tool has no prerequisites</span>';
+  document.getElementById("dt-out").innerHTML = used.length
+    ? used.map(d => {
+        const info = TMAP[d.to]||{label:d.to};
+        return '<div class="dep-item" data-slug="'+d.to+'">\u2192 '+info.label+' <span class="hint">needs</span> <span class="hl">'+d.paramMatch+'</span></div>';
+      }).join("")
+    : '<span style="font-size:12px;color:var(--text-dim)">No dependents</span>';
+  document.querySelectorAll('#dt-in .dep-item, #dt-out .dep-item').forEach(el => {
+    el.addEventListener('click', () => showDetail(el.dataset.slug));
+  });
+  // Downstream impact
+  const downstreamSet = new Set();
+  (function walk(s) {
+    EDGES.filter(e => e.from === s).forEach(e => {
+      if (!downstreamSet.has(e.to)) { downstreamSet.add(e.to); walk(e.to); }
+    });
+  })(slug);
+  downstreamSet.delete(slug);
+  const downList = [...downstreamSet];
+  const di = document.getElementById("dt-impact");
+  di.innerHTML = "";
+  if (!downList.length) {
+    di.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">No downstream impact</span>';
+  } else {
+    const show = downList.slice(0, 15);
+    let ih = '<div style="font-size:11px;color:var(--text-dim);margin-bottom:5px">'+downList.length+' tool'+(downList.length>1?'s':'')+' downstream</div>';
+    ih += show.map(slug2 => {
+      const info = TMAP[slug2]||{label:slug2};
+      return '<div class="dep-item" data-slug="'+slug2+'">'+info.label+' <span class="hint">('+slug2+')</span></div>';
+    }).join("");
+    if (downList.length > 15) ih += '<div style="font-size:11px;color:var(--text-dim);padding:5px 9px">... and '+(downList.length-15)+' more</div>';
+    di.innerHTML = ih;
+    di.querySelectorAll('.dep-item').forEach(el => el.addEventListener('click', () => showDetail(el.dataset.slug)));
+    const hlBtn = document.createElement("button");
+    hlBtn.textContent = "Highlight in Graph";
+    hlBtn.style.cssText = "margin-top:6px;background:transparent;color:var(--gold);border:1px solid var(--gold);padding:5px 12px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer";
+    hlBtn.addEventListener("click", () => {
+      if (!network) return;
+      network.selectNodes(downList);
+      network.fit({animation:true, nodes:downList});
+      document.querySelector('[data-tab="graph"]').click();
+    });
+    di.appendChild(hlBtn);
+  }
+  document.getElementById("detail").classList.add("open");
+}
+function hideDetail() { document.getElementById("detail").classList.remove("open"); }
+document.getElementById("detail-close").addEventListener("click", hideDetail);
+
+// Nav buttons
+(function addNavButtons() {
+  const c = document.getElementById("graph-container");
+  const d = document.createElement("div");
+  d.id = "nav-wrap";
+  d.innerHTML = '<button id="nb-in" title="Zoom in">+</button><button id="nb-out" title="Zoom out">&minus;</button><button id="nb-fit" title="Fit">&#9632;</button><button id="nb-export" class="exp-btn" title="Export as PNG">PNG</button>';
+  c.appendChild(d);
+  const zoom = (f) => () => { if (network) { const s=network.getScale(); network.moveTo({scale:s*f}); }};
+  document.getElementById("nb-in").addEventListener("click", zoom(1.3));
+  document.getElementById("nb-out").addEventListener("click", zoom(1/1.3));
+  document.getElementById("nb-fit").addEventListener("click", () => { if (network) network.fit({animation:true}); });
+  document.getElementById("nb-export").addEventListener("click", () => {
+    if (!network) return;
+    const cvs = network.canvas.frame.canvas;
+    if (!cvs) return;
+    const link = document.createElement("a");
+    link.download = "dep-graph.png";
+    link.href = cvs.toDataURL("image/png");
+    link.click();
+  });
+})();
+
+// Filter listeners
+document.getElementById("filter-tk").addEventListener("change", renderGraph);
+document.getElementById("filter-q").addEventListener("input", renderGraph);
+document.getElementById("filter-conf").addEventListener("change", renderGraph);
+document.getElementById("filter-layout").addEventListener("change", () => {
+  renderGraph();
+  if (network) {
+    if (document.getElementById("filter-layout").value === "force") {
+      setTimeout(() => network.stabilize(120), 300);
+    }
+    setTimeout(() => network.fit({animation:true}), 400);
+  }
+});
+window.addEventListener("resize", () => network && network.fit());
+
+// Planner — live search
+let planSlug = "";
+let planNet = null, planNodeSet = null, planEdgeSet = null;
+const pInput = document.getElementById("plan-input");
+const pResults = document.getElementById("plan-results");
+
+function renderPlanResults(q) {
+  q = (q||"").toLowerCase().trim();
+  const matched = q ? NODES.filter(n => n.id.toLowerCase().includes(q) || n.label.toLowerCase().includes(q)).slice(0, 50) : [];
+  if (!matched.length) {
+    pResults.innerHTML = q ? '<div class="pr-empty">No tools match &quot;'+q+'&quot;</div>' : '';
+    pResults.style.display = q ? "block" : "none";
+    return;
+  }
+  pResults.innerHTML = matched.map(n =>
+    '<div class="pr-item" data-slug="'+n.id+'">'+n.label+' <small>'+n.id+'</small></div>'
+  ).join("");
+  pResults.style.display = "block";
+  pResults.querySelectorAll(".pr-item").forEach(el => {
+    el.addEventListener("click", () => {
+      planSlug = el.dataset.slug;
+      pInput.value = TMAP[planSlug]?.label || planSlug;
+      pResults.style.display = "none";
+    });
+  });
+}
+
+pInput.addEventListener("input", () => renderPlanResults(pInput.value));
+pInput.addEventListener("blur", () => setTimeout(() => { pResults.style.display = "none"; }, 200));
+pInput.addEventListener("focus", () => { if (pInput.value.trim()) renderPlanResults(pInput.value); });
+pInput.addEventListener("keydown", e => {
+  const items = pResults.querySelectorAll(".pr-item");
+  if (!items.length) return;
+  const cur = pResults.querySelector(".sel");
+  let idx = -1;
+  if (cur) { idx = Array.from(items).indexOf(cur); cur.classList.remove("sel"); }
+  if (e.key === "ArrowDown") { e.preventDefault(); idx = Math.min(idx+1, items.length-1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); idx = Math.max(idx-1, 0); }
+  else if (e.key === "Enter" && cur) { e.preventDefault(); cur.click(); return; }
+  else return;
+  items[idx].classList.add("sel");
+  items[idx].scrollIntoView({block:"nearest"});
+  planSlug = items[idx].dataset.slug;
+});
+
+document.getElementById("plan-go").addEventListener("click", () => {
+  const slug = planSlug;
+  if (!slug) { pInput.focus(); return; }
+  const visited = new Set();
+  const steps = [];
+  function walk(s, d) {
+    if (visited.has(s) || d > 20) return;
+    visited.add(s);
+    EDGES.filter(e => e.to === s).forEach(e => walk(e.from, d+1));
+    if (!steps.find(x => x.slug === s)) steps.push({slug:s, deps:EDGES.filter(e=>e.to===s).map(e=>e.from)});
+  }
+  walk(slug, 0);
+  const info = TMAP[slug]||{label:slug};
+  const out = document.getElementById("plan-out");
+  if (steps.length <= 1) {
+    out.innerHTML = '<div class="plan-empty"><div class="icon">&#10003;</div><h3>No prerequisites</h3><p><strong>'+info.label+'</strong> has no dependencies and can run standalone.</p></div>';
+    document.getElementById("sim-btn").style.display = "none";
+    document.getElementById("plan-graph").style.display = "none";
+    return;
+  }
+  let html = '<div class="summary">Execution plan for <strong>'+info.label+'</strong> &mdash; '+steps.length+' step'+(steps.length>1?'s':'')+'</div>';
+  steps.forEach((s, i) => {
+    const i2 = TMAP[s.slug]||{label:s.slug};
+    const isTarget = s.slug === slug;
+    html += '<div class="plan-step" data-i="'+i+'" data-slug="'+s.slug+'">' +
+      '<div class="num">'+(i+1)+'</div>' +
+      '<div class="info"><strong>'+i2.label+'</strong><small>'+s.slug+(s.deps.length?' &mdash; needs '+s.deps.join(", "):'')+'</small></div>' +
+      '<span class="tag '+(isTarget?'consumer':'producer')+'">'+(isTarget?'Target':'Step')+'</span>' +
+      (i < steps.length-1 ? '<span class="arrow">\u2192</span>' : '') +
+    '</div>';
+  });
+  out.innerHTML = html;
+  document.getElementById("sim-btn").style.display = "block";
+  // Build mini dependency graph
+  if (planNet) { planNet.destroy(); planNet = null; }
+  const pgEl = document.getElementById("plan-graph");
+  pgEl.style.display = "block";
+  const stepIds = new Set(steps.map(s => s.slug));
+  const pnArr = steps.map(s => {
+    const n = NODES.find(x => x.id === s.slug);
+    const tkc = COL[n?.toolkit] || {bg:"#666",bd:"#888",hl:"#999"};
+    return {
+      id:s.slug,
+      label:(TMAP[s.slug]?.label||s.slug).length>22?(TMAP[s.slug]?.label||s.slug).substring(0,19)+"...":(TMAP[s.slug]?.label||s.slug),
+      color:{background:"#1f1f45",border:"#2a2a55",highlight:{background:tkc.bg,border:tkc.bd}},
+      font:{color:"#6b6b95",size:9}, shape:"dot",size:16,borderWidth:2
+    };
+  });
+  const peArr = EDGES.filter(e => stepIds.has(e.from) && stepIds.has(e.to)).map(e => ({
+    from:e.from, to:e.to, color:{color:"rgba(245,200,66,0.12)",highlight:"#f5c842"}, width:1,
+    smooth:{type:"curvedCW",roundness:0.1}
+  }));
+  planNodeSet = new vis.DataSet(pnArr);
+  planEdgeSet = new vis.DataSet(peArr);
+  planNet = new vis.Network(pgEl, {nodes:planNodeSet,edges:planEdgeSet}, {
+    nodes:{borderWidth:2},
+    edges:{smooth:{type:"curvedCW",roundness:0.1}},
+    layout:{hierarchical:{direction:"UD",sortMethod:"directed",nodeSpacing:120,levelSeparation:80}},
+    physics:false, interaction:{dragNodes:false,dragView:true,zoomView:true,hover:false},
+    height:"100%"
+  });
+  planNet.fit({animation:false});
+});
+
+document.getElementById("sim-btn").addEventListener("click", function() {
+  const steps = document.querySelectorAll("#plan-out .plan-step");
+  if (!steps.length) return;
+  this.disabled = true; this.textContent = "Running...";
+  document.getElementById("planner-tab").classList.add("sim-active");
+  let i = 0;
+  function tick() {
+    steps.forEach(s => { s.classList.remove("current", "done"); });
+    for (let j = 0; j < i; j++) steps[j].classList.add("done");
+    if (i < steps.length) {
+      steps[i].classList.add("current");
+      // Animate mini graph
+      if (planNodeSet) {
+        for (let j = 0; j < steps.length; j++) {
+          const slug = steps[j].dataset.slug;
+          if (j < i) {
+            const n = NODES.find(x => x.id === slug);
+            const tkc = COL[n?.toolkit] || {bg:"#666",bd:"#888",hl:"#999"};
+            planNodeSet.update({id:slug, color:{background:tkc.bg,border:tkc.bd,highlight:{background:tkc.bg,border:tkc.bd}}, font:{color:"#e0e0e0",size:9}, size:16});
+          } else if (j === i) {
+            planNodeSet.update({id:slug, color:{background:"#f5c842",border:"#ffdd66",highlight:{background:"#f5c842",border:"#ffdd66"}}, font:{color:"#fff",size:10}, size:22});
+          } else {
+            planNodeSet.update({id:slug, color:{background:"#1f1f45",border:"#2a2a55",highlight:{background:"#3a3a6a",border:"#4a4a7a"}}, font:{color:"#6b6b95",size:9}, size:16});
+          }
+        }
+      }
+      i++;
+      setTimeout(tick, 500);
+    } else {
+      document.getElementById("planner-tab").classList.remove("sim-active");
+      document.getElementById("sim-btn").disabled = false;
+      document.getElementById("sim-btn").textContent = "\u25B6 Replay";
+    }
+  }
+  tick();
+});
+
+// Stats
+document.getElementById("stats-params").innerHTML = ${topParamsJSON}.map(([p,c]) =>
+  '<span class="tag-item"><span class="count">'+c+'</span><span class="name">'+p+'</span></span>'
+).join("");
+document.getElementById("stats-producers").innerHTML = ${topProducersJSON}.map(([s,c],i) =>
+  '<li><span class="rnk">#'+(i+1)+'</span><span class="slug">'+(TMAP[s]?.label||s)+'</span><span class="cnt">'+c+'</span></li>'
+).join("");
+document.getElementById("stats-consumers").innerHTML = ${topConsumersJSON}.map(([s,c],i) =>
+  '<li><span class="rnk">#'+(i+1)+'</span><span class="slug">'+(TMAP[s]?.label||s)+'</span><span class="cnt">'+c+'</span></li>'
+).join("");
+
+// Toolkit management
+function assignTkColor(slug) {
+  if (COL[slug]) return COL[slug];
+  const c = TK_PALETTE[nextColorIdx % TK_PALETTE.length];
+  nextColorIdx++;
+  COL[slug] = c;
+  return c;
+}
+function addTkFilterOpt(slug, label) {
+  const sel = document.getElementById("filter-tk");
+  if ([...sel.options].some(o => o.value === slug)) return;
+  const o = document.createElement("option");
+  o.value = slug; o.textContent = label; sel.appendChild(o);
+}
+function addTkLegend(slug, color, label) {
+  const leg = document.querySelector("#legend");
+  if (!leg) return;
+  if (leg.querySelector("[data-tk='"+slug+"']")) return;
+  const item = document.createElement("div"); item.className = "lg-item"; item.dataset.tk = slug;
+  item.innerHTML = '<span class="lg-dot" style="background:'+color.bg+'"></span> '+label;
+  leg.appendChild(item);
+}
+function addTkListItem(slug, label, count, color, removable) {
+  const list = document.getElementById("tk-list");
+  const item = document.createElement("div"); item.className = "tk-item"; item.dataset.tk = slug;
+  item.innerHTML = '<span class="tk-dot" style="background:'+color.bg+'"></span><span class="tk-name">'+label+'</span><span class="tk-count">'+count+' tools</span>';
+  if (removable) {
+    const rm = document.createElement("button"); rm.className = "tk-rm"; rm.textContent = "\u2715";
+    rm.addEventListener("click", () => removeToolkit(slug));
+    item.appendChild(rm);
+  } else {
+    const tag = document.createElement("span"); tag.style.cssText = "font-size:10px;color:var(--text-dim)"; tag.textContent = "pre-loaded";
+    item.appendChild(tag);
+  }
+  list.appendChild(item);
+}
+function setTkStatus(msg, type) {
+  const el = document.getElementById("tk-status");
+  el.textContent = msg; el.className = "tk-status" + (type ? " "+type : "");
+}
+async function fetchToolkit(slug, apiKey, serverUrl) {
+  setTkStatus("Fetching "+slug+"...", "");
+  const resp = await fetch(serverUrl.replace(/\\/+$/,"")+"/api/toolkit", {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({slug, apiKey: apiKey || undefined})
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || "HTTP "+resp.status);
+  }
+  return resp.json();
+}
+function mergeGraphData(data) {
+  const existingIds = new Set(NODES.map(n => n.id));
+  const added = [];
+  for (const node of data.nodes) {
+    if (!existingIds.has(node.id)) {
+      NODES.push(node);
+      TMAP[node.id] = { label: node.label, toolkit: node.toolkit };
+      existingIds.add(node.id);
+      added.push(node);
+    }
+  }
+  const existingEdgeKeys = new Set(EDGES.map(e => e.from+"|"+e.to+"|"+e.paramMatch));
+  for (const edge of data.edges) {
+    const key = edge.from+"|"+edge.to+"|"+edge.paramMatch;
+    if (!existingEdgeKeys.has(key)) {
+      EDGES.push(edge);
+      existingEdgeKeys.add(key);
+    }
+  }
+  if (data.toolMap) Object.assign(TMAP, data.toolMap);
+  return added;
+}
+function removeToolkit(slug) {
+  if (slug === "googlesuper" || slug === "github") return;
+  // Remove from data
+  for (let i = NODES.length-1; i >= 0; i--) { if (NODES[i].toolkit === slug) NODES.splice(i,1); }
+  for (let i = EDGES.length-1; i >= 0; i--) { if (EDGES[i].from.startsWith(slug.toUpperCase()) || EDGES[i].to.startsWith(slug.toUpperCase())) EDGES.splice(i,1); }
+  // Remove from filter
+  const sel = document.getElementById("filter-tk");
+  for (let i = sel.options.length-1; i >= 0; i--) { if (sel.options[i].value === slug) sel.remove(i); }
+  // Remove from legend
+  const leg = document.querySelector("#legend [data-tk='"+slug+"']");
+  if (leg) leg.remove();
+  // Remove from list
+  const li = document.querySelector("#tk-list [data-tk='"+slug+"']");
+  if (li) li.remove();
+  // Re-render
+  if (document.getElementById("filter-tk").value === slug) document.getElementById("filter-tk").value = "all";
+  delete COL[slug];
+  renderGraph();
+  setTkStatus("Removed "+slug, "");
+}
+
+document.getElementById("tk-fetch").addEventListener("click", async () => {
+  const slug = document.getElementById("tk-slug").value.trim().toLowerCase();
+  const key = document.getElementById("tk-key").value.trim();
+  const server = document.getElementById("tk-server").value.trim() || "http://localhost:3456";
+  if (!slug) { setTkStatus("Enter a toolkit slug", "err"); return; }
+  const btn = document.getElementById("tk-fetch"); btn.disabled = true;
+  try {
+    const data = await fetchToolkit(slug, key, server);
+    const label = data.toolkitLabel || slug.charAt(0).toUpperCase()+slug.slice(1);
+    const added = mergeGraphData(data);
+    if (!added.length) { setTkStatus('Toolkit "'+label+'" already loaded', "ok"); btn.disabled = false; return; }
+    const color = assignTkColor(slug);
+    addTkFilterOpt(slug, label);
+    addTkLegend(slug, color, label);
+    addTkListItem(slug, label, data.nodes.length, color, true);
+    document.getElementById("tk-slug").value = "";
+    document.getElementById("tk-key").value = "";
+    const count = data.nodes.length;
+    setTkStatus("Added "+label+" ("+count+" tools, "+data.edges.length+" edges)", "ok");
+    renderGraph();
+  } catch (err) {
+    setTkStatus("Error: "+err.message, "err");
+  }
+  btn.disabled = false;
+});
+document.getElementById("tk-slug").addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("tk-fetch").click(); });
+
+// Init
+renderGraph();
+setTimeout(() => document.getElementById("loading").classList.add("hidden"), 600);
+</script>
+</body></html>`;
+}
+
+export function visualize(graph?: DependencyGraph, outputPath?: string): string {
+  const path = outputPath ?? join(import.meta.dir, "..", "graph.html");
+
+  let data = graph;
+  if (!data || data.nodes.length === 0) {
+    data = loadGraphData();
+  }
+  if (data.nodes.length === 0) {
+    console.log("No graph data available. Run the full pipeline first.");
+    return "";
+  }
+
+  const html = generateHTML(data);
+  writeFileSync(path, html, "utf-8");
+  const size = (new TextEncoder().encode(html).length / 1024).toFixed(0);
+  console.log(`Graph visualization written to: ${path} (${size} KB)`);
+  return path;
+}
