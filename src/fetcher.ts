@@ -3,11 +3,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import type { RawTool, ToolkitSlug } from "./types";
 
-const TOOLKITS: { slug: ToolkitSlug; label: string }[] = [
-  { slug: "googlesuper", label: "Google Super" },
-  { slug: "github", label: "GitHub" },
-];
-
 const PROJECT_ROOT = join(import.meta.dir, "..");
 const CACHE_DIR = join(PROJECT_ROOT, ".cache");
 
@@ -73,16 +68,19 @@ export async function fetchTools(
   return tools;
 }
 
-export async function fetchAllTools(): Promise<Map<ToolkitSlug, RawTool[]>> {
+export async function fetchAllTools(slugs: string[] = []): Promise<Map<string, RawTool[]>> {
+  if (slugs.length === 0) {
+    return new Map();
+  }
   console.log("Fetching tools from Composio...");
-  const results = new Map<ToolkitSlug, RawTool[]>();
+  const results = new Map<string, RawTool[]>();
 
-  for (const tk of TOOLKITS) {
+  for (const slug of slugs) {
     try {
-      const tools = await fetchTools(tk.slug);
-      results.set(tk.slug, tools);
+      const tools = await fetchTools(slug);
+      results.set(slug, tools);
     } catch (err) {
-      console.error(`  [${tk.slug}] Failed:`, (err as Error).message);
+      console.error(`  [${slug}] Failed:`, (err as Error).message);
     }
   }
 

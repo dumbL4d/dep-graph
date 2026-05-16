@@ -3,7 +3,6 @@ import type {
   DependencyGraph,
   GraphNode,
   RawTool,
-  ToolkitSlug,
 } from "./types";
 
 const SKIP_PARAMS = new Set([
@@ -102,13 +101,11 @@ function pickBestProducer(producers: RawTool[]): RawTool | null {
 }
 
 function buildGroup(toolkit: string): string {
-  if (toolkit === "googlesuper") return "Google Super";
-  if (toolkit === "github") return "GitHub";
   return toolkit;
 }
 
 export function buildGraph(
-  toolsByToolkit: Map<ToolkitSlug, RawTool[]>,
+  toolsByToolkit: Map<string, RawTool[]>,
 ): DependencyGraph {
   const toolMap = new Map<string, RawTool>();
   const nodes: GraphNode[] = [];

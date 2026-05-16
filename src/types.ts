@@ -63,4 +63,4 @@ export interface MatchResult {
   confidence: number;
 }
 
-export type ToolkitSlug = "googlesuper" | "github";
+export type ToolkitSlug = string;

@@ -19,45 +19,10 @@ function generateHTML(graph: DependencyGraph): string {
   const nodesJSON = JSON.stringify(graph.nodes);
   const edgesJSON = JSON.stringify(graph.edges);
 
-  const totalEdges = graph.edges.length;
-  const totalNodes = graph.nodes.length;
-  const gsNodes = graph.nodes.filter((n) => n.toolkit === "googlesuper").length;
-  const ghNodes = graph.nodes.filter((n) => n.toolkit === "github").length;
-  const gsEdges = graph.edges.filter((e) => e.from.startsWith("GOOGLESUPER")).length;
-  const ghEdges = graph.edges.filter((e) => e.from.startsWith("GITHUB")).length;
-
   const toolMap: Record<string, { label: string; toolkit: string }> = {};
   for (const n of graph.nodes) {
     toolMap[n.id] = { label: n.label, toolkit: n.toolkit };
   }
-
-  const outDegree: Record<string, string[]> = {};
-  const inDegree: Record<string, string[]> = {};
-  for (const e of graph.edges) {
-    (outDegree[e.from] ??= []).push(e.to);
-    (inDegree[e.to] ??= []).push(e.from);
-  }
-
-  const sortedByOut = Object.entries(outDegree)
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 10)
-    .map(([k, v]) => [k, v.length]);
-  const sortedByIn = Object.entries(inDegree)
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 10)
-    .map(([k, v]) => [k, v.length]);
-
-  const topProducersJSON = JSON.stringify(sortedByOut);
-  const topConsumersJSON = JSON.stringify(sortedByIn);
-
-  const paramDist: Record<string, number> = {};
-  for (const e of graph.edges) {
-    paramDist[e.paramMatch] = (paramDist[e.paramMatch] || 0) + 1;
-  }
-  const topParams = Object.entries(paramDist)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-  const topParamsJSON = JSON.stringify(topParams);
 
   return `<!DOCTYPE html><html lang="en">
 <head>
@@ -251,8 +216,6 @@ input,select,button{font-family:inherit}
     <label>Toolkit</label>
     <select id="filter-tk">
       <option value="all">All</option>
-      <option value="googlesuper">Google Super</option>
-      <option value="github">GitHub</option>
     </select>
     <label>Search</label>
     <input id="filter-q" type="text" placeholder="Name or slug..." />
@@ -272,8 +235,6 @@ input,select,button{font-family:inherit}
   <div id="graph-container">
     <div id="legend">
       <h4>Legend</h4>
-      <div class="lg-item"><span class="lg-dot" style="background:var(--accent)"></span> Google Super</div>
-      <div class="lg-item"><span class="lg-dot" style="background:var(--accent2)"></span> GitHub</div>
       <div class="lg-item"><span class="lg-line"></span> Dependency</div>
     </div>
   </div>
@@ -303,20 +264,12 @@ input,select,button{font-family:inherit}
 </div>
 
 <div class="tab-content" id="stats-tab">
-  <div class="stats-grid">
-    <div class="stat-card"><div class="num gold">${totalNodes}</div><div class="lbl">Total Tools</div></div>
-    <div class="stat-card"><div class="num gold">${totalEdges}</div><div class="lbl">Dependencies</div></div>
-    <div class="stat-card"><div class="num">${gsNodes}</div><div class="lbl">Google Super Tools</div></div>
-    <div class="stat-card"><div class="num accent2">${ghNodes}</div><div class="lbl">GitHub Tools</div></div>
-    <div class="stat-card"><div class="num">${gsEdges}</div><div class="lbl">Google Super Edges</div></div>
-    <div class="stat-card"><div class="num accent2">${ghEdges}</div><div class="lbl">GitHub Edges</div></div>
+  <div class="stats-grid" id="stats-grid">
   </div>
-
   <div class="stats-section">
     <h3>Top Referenced Parameters</h3>
     <div class="tags-list" id="stats-params"></div>
   </div>
-
   <div class="cols">
     <div class="stats-section">
       <h3>Top Producers (outgoing edges)</h3>
@@ -327,9 +280,8 @@ input,select,button{font-family:inherit}
       <ul class="rank-list" id="stats-consumers"></ul>
     </div>
   </div>
-
-  <div class="stats-footer">
-    Analysis across ${totalNodes} tools &middot; ${totalEdges} dependency edges via JSON Schema reference matching
+  <div class="stats-footer" id="stats-footer">
+    No data loaded. Go to the Toolkits tab to add toolkits.
   </div>
 </div>
 
@@ -351,20 +303,15 @@ input,select,button{font-family:inherit}
       <button id="tk-fetch">Fetch</button>
     </div>
     <div class="tk-status" id="tk-status">Enter a toolkit slug and click Fetch. Start the server with <strong>bun run server.ts</strong>.</div>
-    <div class="tk-list" id="tk-list">
-      <div class="tk-item">
-        <span class="tk-dot" style="background:#e94560"></span>
-        <span class="tk-name">Google Super</span>
-        <span class="tk-count">${gsNodes} tools</span>
-        <span style="font-size:10px;color:var(--text-dim)">pre-loaded</span>
-      </div>
-      <div class="tk-item">
-        <span class="tk-dot" style="background:#4f6ced"></span>
-        <span class="tk-name">GitHub</span>
-        <span class="tk-count">${ghNodes} tools</span>
-        <span style="font-size:10px;color:var(--text-dim)">pre-loaded</span>
-      </div>
+    <div class="tk-suggest" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+      <span style="font-size:11px;color:var(--text-dim);line-height:26px">Suggestions:</span>
+      <button class="tk-chip" data-slug="googlesuper" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer">googlesuper</button>
+      <button class="tk-chip" data-slug="github" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer">github</button>
+      <button class="tk-chip" data-slug="slack" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer">slack</button>
+      <button class="tk-chip" data-slug="notion" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer">notion</button>
+      <button class="tk-chip" data-slug="asana" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer">asana</button>
     </div>
+    <div class="tk-list" id="tk-list"></div>
   </div>
 </div>
 
@@ -392,11 +339,11 @@ input,select,button{font-family:inherit}
 </div>
 
 <script>
-const NODES = ${nodesJSON};
-const EDGES = ${edgesJSON};
-const TMAP = ${JSON.stringify(toolMap)};
+let NODES = [];
+let EDGES = [];
+let TMAP = {};
 
-let COL = {googlesuper:{bg:"#e94560",bd:"#ff6b81",hl:"#e94560"},github:{bg:"#4f6ced",bd:"#6b85f0",hl:"#4f6ced"}};
+let COL = {};
 const TK_PALETTE = [
   {bg:"#2ecc71",bd:"#4cdd8a",hl:"#2ecc71"},
   {bg:"#f39c12",bd:"#f5b342",hl:"#f39c12"},
@@ -411,7 +358,7 @@ const TK_PALETTE = [
   {bg:"#795548",bd:"#967166",hl:"#795548"},
   {bg:"#607d8b",bd:"#8aa0ae",hl:"#607d8b"},
 ];
-let nextColorIdx = 2;
+let nextColorIdx = 0;
 
 // Tab switching
 document.querySelectorAll('.tab-btn').forEach(b => {
@@ -485,9 +432,8 @@ function showDetail(slug) {
   if (!n) return;
   document.getElementById("dt-title").textContent = n.label;
   const badge = document.getElementById("dt-badge");
-  const tkLabel = n.toolkit === "googlesuper" ? "Google Super" : n.toolkit === "github" ? "GitHub" : n.toolkit.charAt(0).toUpperCase() + n.toolkit.slice(1);
-  badge.textContent = tkLabel;
-  badge.className = "tk-tag " + (n.toolkit === "github" ? "gh" : n.toolkit === "googlesuper" ? "gs" : "");
+  badge.textContent = n.toolkit;
+  badge.className = "tk-tag";
   document.getElementById("dt-desc").innerHTML = '<div class="p">' + n.label + ' (' + n.id + ')</div>';
   const deps = EDGES.filter(e => e.to === slug);
   const used = EDGES.filter(e => e.from === slug);
@@ -732,15 +678,34 @@ document.getElementById("sim-btn").addEventListener("click", function() {
 });
 
 // Stats
-document.getElementById("stats-params").innerHTML = ${topParamsJSON}.map(([p,c]) =>
-  '<span class="tag-item"><span class="count">'+c+'</span><span class="name">'+p+'</span></span>'
-).join("");
-document.getElementById("stats-producers").innerHTML = ${topProducersJSON}.map(([s,c],i) =>
-  '<li><span class="rnk">#'+(i+1)+'</span><span class="slug">'+(TMAP[s]?.label||s)+'</span><span class="cnt">'+c+'</span></li>'
-).join("");
-document.getElementById("stats-consumers").innerHTML = ${topConsumersJSON}.map(([s,c],i) =>
-  '<li><span class="rnk">#'+(i+1)+'</span><span class="slug">'+(TMAP[s]?.label||s)+'</span><span class="cnt">'+c+'</span></li>'
-).join("");
+function renderStats() {
+  const totalNodes = NODES.length;
+  const totalEdges = EDGES.length;
+  const byTk = {};
+  NODES.forEach(n => { byTk[n.toolkit] = (byTk[n.toolkit]||0) + 1; });
+  const byTkE = {};
+  EDGES.forEach(e => {
+    const tk = TMAP[e.from]?.toolkit || "";
+    byTkE[tk] = (byTkE[tk]||0) + 1;
+  });
+  let gridHtml = '<div class="stat-card"><div class="num gold">'+totalNodes+'</div><div class="lbl">Total Tools</div></div><div class="stat-card"><div class="num gold">'+totalEdges+'</div><div class="lbl">Dependencies</div></div>';
+  Object.entries(byTk).forEach(([tk,cnt]) => {
+    const ecnt = byTkE[tk] || 0;
+    gridHtml += '<div class="stat-card"><div class="num">'+cnt+'</div><div class="lbl">'+tk+' Tools</div></div>';
+    gridHtml += '<div class="stat-card"><div class="num">'+ecnt+'</div><div class="lbl">'+tk+' Edges</div></div>';
+  });
+  document.getElementById("stats-grid").innerHTML = gridHtml || '<div class="stat-card"><div class="num gold">0</div><div class="lbl">No toolkits loaded</div></div>';
+  document.getElementById("stats-footer").textContent = totalNodes ? "Analysis across "+totalNodes+" tools \u00b7 "+totalEdges+" dependency edges via JSON Schema reference matching" : "No data loaded. Go to the Toolkits tab to add toolkits.";
+  // Params
+  const pd = {};
+  EDGES.forEach(e => { pd[e.paramMatch] = (pd[e.paramMatch]||0) + 1; });
+  document.getElementById("stats-params").innerHTML = Object.entries(pd).sort((a,b) => b[1]-a[1]).slice(0,10).map(([p,c]) => '<span class="tag-item"><span class="count">'+c+'</span><span class="name">'+p+'</span></span>').join("");
+  // Producers
+  const outD = {}; EDGES.forEach(e => { (outD[e.from]??=[]).push(e.to); });
+  const inD = {}; EDGES.forEach(e => { (inD[e.to]??=[]).push(e.from); });
+  document.getElementById("stats-producers").innerHTML = Object.entries(outD).sort((a,b) => b[1].length-a[1].length).slice(0,10).map(([s,v],i) => '<li><span class="rnk">#'+(i+1)+'</span><span class="slug">'+(TMAP[s]?.label||s)+'</span><span class="cnt">'+v.length+'</span></li>').join("");
+  document.getElementById("stats-consumers").innerHTML = Object.entries(inD).sort((a,b) => b[1].length-a[1].length).slice(0,10).map(([s,v],i) => '<li><span class="rnk">#'+(i+1)+'</span><span class="slug">'+(TMAP[s]?.label||s)+'</span><span class="cnt">'+v.length+'</span></li>').join("");
+}
 
 // Toolkit management
 function assignTkColor(slug) {
@@ -817,23 +782,18 @@ function mergeGraphData(data) {
   return added;
 }
 function removeToolkit(slug) {
-  if (slug === "googlesuper" || slug === "github") return;
-  // Remove from data
   for (let i = NODES.length-1; i >= 0; i--) { if (NODES[i].toolkit === slug) NODES.splice(i,1); }
   for (let i = EDGES.length-1; i >= 0; i--) { if (EDGES[i].from.startsWith(slug.toUpperCase()) || EDGES[i].to.startsWith(slug.toUpperCase())) EDGES.splice(i,1); }
-  // Remove from filter
   const sel = document.getElementById("filter-tk");
   for (let i = sel.options.length-1; i >= 0; i--) { if (sel.options[i].value === slug) sel.remove(i); }
-  // Remove from legend
   const leg = document.querySelector("#legend [data-tk='"+slug+"']");
   if (leg) leg.remove();
-  // Remove from list
   const li = document.querySelector("#tk-list [data-tk='"+slug+"']");
   if (li) li.remove();
-  // Re-render
   if (document.getElementById("filter-tk").value === slug) document.getElementById("filter-tk").value = "all";
   delete COL[slug];
   renderGraph();
+  renderStats();
   setTkStatus("Removed "+slug, "");
 }
 
@@ -857,6 +817,7 @@ document.getElementById("tk-fetch").addEventListener("click", async () => {
     const count = data.nodes.length;
     setTkStatus("Added "+label+" ("+count+" tools, "+data.edges.length+" edges)", "ok");
     renderGraph();
+    renderStats();
   } catch (err) {
     setTkStatus("Error: "+err.message, "err");
   }
@@ -864,7 +825,16 @@ document.getElementById("tk-fetch").addEventListener("click", async () => {
 });
 document.getElementById("tk-slug").addEventListener("keydown", e => { if (e.key === "Enter") document.getElementById("tk-fetch").click(); });
 
+// Suggestion chips
+document.querySelectorAll(".tk-chip").forEach(chip => {
+  chip.addEventListener("click", () => {
+    document.getElementById("tk-slug").value = chip.dataset.slug;
+    document.getElementById("tk-fetch").click();
+  });
+});
+
 // Init
+renderStats();
 renderGraph();
 setTimeout(() => document.getElementById("loading").classList.add("hidden"), 600);
 </script>
@@ -875,13 +845,10 @@ export function visualize(graph?: DependencyGraph, outputPath?: string): string 
   const path = outputPath ?? join(import.meta.dir, "..", "graph.html");
 
   let data = graph;
-  if (!data || data.nodes.length === 0) {
+  if (!data) {
     data = loadGraphData();
   }
-  if (data.nodes.length === 0) {
-    console.log("No graph data available. Run the full pipeline first.");
-    return "";
-  }
+  if (!data) data = { nodes: [], edges: [], toolMap: new Map() };
 
   const html = generateHTML(data);
   writeFileSync(path, html, "utf-8");

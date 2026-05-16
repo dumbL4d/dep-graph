@@ -9,15 +9,16 @@ async function main() {
 
   const toolsByToolkit = await fetchAllTools();
 
-  if (toolsByToolkit.size === 0) {
-    console.error("No tools fetched. Cannot build graph.");
-    process.exit(1);
-  }
-
   const totalTools = [...toolsByToolkit.values()].reduce(
     (sum, tools) => sum + tools.length, 0,
   );
   console.log(`\nTotal tools loaded: ${totalTools}`);
+
+  if (totalTools === 0) {
+    console.log("No tools to build graph. Generating empty graph.");
+    visualize({ nodes: [], edges: [], toolMap: new Map() });
+    return;
+  }
 
   console.log("Building dependency graph...");
   const graph = buildGraph(toolsByToolkit);
